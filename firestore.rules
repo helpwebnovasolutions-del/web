@@ -1,0 +1,113 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn() && (request.auth.uid == userId || isAdmin());
+      allow create: if signedIn() && request.auth.uid == userId
+        && request.resource.data.role == 'client'
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['uid','email','displayName','role','createdAt','updatedAt']);
+      allow update: if signedIn() && request.auth.uid == userId
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName','updatedAt']);
+      allow delete: if false;
+    }
+
+    // Public forms may create submissions; only a server-authorized admin may read/delete them.
+    // Keep this collection free of passwords, OTPs, tokens, payment data, or other secrets.
+    match /formSubmissions/{submissionId} {
+      allow create: if request.resource.data.keys().hasOnly(['id','submittedAt','createdAt','page','formName','fields'])
+        && request.resource.data.id is string
+        && request.resource.data.page is string
+        && request.resource.data.formName is string
+        && request.resource.data.fields is map
+        && request.resource.data.fields.keys().size() <= 60;
+      allow read, update, delete: if isAdmin();
+    }
+
+    // Public visitors may create a consultation request; only admins can read, update status, or delete.
+    match /callBookings/{bookingId} {
+      allow create: if request.resource.data.keys().hasOnly([
+          'id','name','email','phone','service','date','time','meeting','details','status','submittedAt','createdAt','statusUpdatedAt'
+        ])
+        && request.resource.data.id is string
+        && request.resource.data.name is string && request.resource.data.name.size() <= 120
+        && request.resource.data.email is string && request.resource.data.email.size() <= 180
+        && request.resource.data.phone is string && request.resource.data.phone.size() <= 40
+        && request.resource.data.service is string && request.resource.data.service.size() <= 120
+        && request.resource.data.date is string && request.resource.data.time is string
+        && request.resource.data.meeting in ['Google Meet','Zoom','Phone Call','WhatsApp Call']
+        && request.resource.data.details is string && request.resource.data.details.size() <= 500
+        && request.resource.data.status == 'Pending';
+      allow read, delete: if isAdmin();
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','statusUpdatedAt'])
+        && request.resource.data.status in ['Pending','Contacted','Confirmed','Completed','Cancelled'];
+    }
+
+    // Public visitors can create support requests. Only authenticated admins can
+    // read tickets or publish status reports/change workflow status.
+    match /supportTickets/{ticketId} {
+      allow create: if request.resource.data.keys().hasOnly([
+          'id','name','email','subject','message','priority','status','statusReport',
+          'createdAt','createdAtISO'
+        ])
+        && request.resource.data.id is string && request.resource.data.id.size() <= 40
+        && request.resource.data.name is string && request.resource.data.name.size() <= 120
+        && request.resource.data.email is string && request.resource.data.email.size() <= 180
+        && request.resource.data.subject is string && request.resource.data.subject.size() <= 180
+        && request.resource.data.message is string && request.resource.data.message.size() <= 4000
+        && request.resource.data.priority in ['Low','Normal','High']
+        && request.resource.data.status == 'Open'
+        && request.resource.data.statusReport is string
+        && request.resource.data.statusReport.size() <= 1000;
+      allow read, delete: if isAdmin();
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status','statusReport','statusUpdatedAt'])
+        && request.resource.data.status in ['Open','In progress','Waiting for customer','Resolved']
+        && request.resource.data.statusReport is string
+        && request.resource.data.statusReport.size() <= 1000;
+    }
+
+    // Customer and project records are managed by admins only. Extend these rules
+    // with per-customer ownership checks before exposing private records in client portals.
+    match /customers/{customerId} {
+      allow read, write: if isAdmin();
+    }
+    match /projects/{projectId} {
+      allow read, write: if isAdmin();
+    }
+
+    // Full certificate records are private to admins. Never expose intern email addresses here.
+    match /certificates/{certificateId} {
+      allow read, create, update, delete: if isAdmin();
+    }
+
+    // Sanitized verification records are readable by exact ID only. Public visitors can
+    // verify a certificate but cannot list the registry or create/change any status.
+    match /certificateVerification/{certificateId} {
+      allow get: if true;
+      allow list: if isAdmin();
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasOnly(['id','internName','title','issueDate','status','updatedAt'])
+        && request.resource.data.id == certificateId
+        && request.resource.data.internName is string
+        && request.resource.data.title is string
+        && request.resource.data.issueDate is string
+        && request.resource.data.status in ['Valid','Revoked'];
+      allow delete: if isAdmin();
+    }
+
+    // Invoices remain browser-local until a private, authenticated storage workflow is configured.
+    match /{document=**} { allow read, write: if false; }
+  }
+}
